@@ -1,0 +1,14 @@
+{
+  "agent": "rl-ppo",
+  "seed": 0,
+  "steps": 100000,
+  "budget": 100000,
+  "episodes": 2662,
+  "unique_states": 10,
+  "unique_edges": 42,
+  "unique_seqs": 26227,
+  "crashes": 1003,
+  "first_crash_step": 83,
+  "mean_ep_return_last20": 59.120000000000005,
+  "wall_s": 33.0
+}

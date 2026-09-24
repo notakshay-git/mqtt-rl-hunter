@@ -1,0 +1,14 @@
+{
+  "agent": "coverage",
+  "seed": 0,
+  "steps": 100000,
+  "budget": 100000,
+  "episodes": 6762,
+  "unique_states": 10,
+  "unique_edges": 42,
+  "unique_seqs": 35370,
+  "crashes": 241,
+  "first_crash_step": 303,
+  "mean_ep_return_last20": -1.8700000000000003,
+  "wall_s": 2.8
+}

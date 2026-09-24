@@ -1,9 +1,7 @@
 [random] budget=100000 seed=0
-Traceback (most recent call last):
-  File "/home/sandbox/mqtt-rl-hunter/experiments/run_comparison.py", line 131, in <module>
-    main()
-  File "/home/sandbox/mqtt-rl-hunter/experiments/run_comparison.py", line 120, in main
-    results.append(run_agent(agent, make_env, args.budget, args.seed,
-  File "/home/sandbox/mqtt-rl-hunter/experiments/run_comparison.py", line 77, in run_agent
-    "states_seen": states_seen_names(store, args.env),
-NameError: name 'args' is not defined
+[random] -> {"agent": "random", "seed": 0, "steps": 100000, "episodes": 6687, "unique_states": 10, "states_seen": ["IDLE", "CONNECTED", "AUTHED", "READY", "DATA_MODE", "CLOSED", "LIMBO", "SUSPECT", "CRASHED", "DONE"], "violations": [], "unique_edges": 42, "unique_seqs": 36990, "crashes": 250, "first_crash_step": 47, "wall_s": 0.6}
+[coverage] budget=100000 seed=0
+[coverage] -> {"agent": "coverage", "seed": 0, "steps": 100000, "episodes": 6762, "unique_states": 10, "states_seen": ["IDLE", "CONNECTED", "AUTHED", "READY", "DATA_MODE", "CLOSED", "LIMBO", "SUSPECT", "CRASHED", "DONE"], "violations": [], "unique_edges": 42, "unique_seqs": 35370, "crashes": 241, "first_crash_step": 303, "wall_s": 2.8}
+[rl] budget=100000 seed=0
+[rl] -> {"agent": "rl-ppo", "seed": 0, "steps": 100000, "episodes": 2662, "unique_states": 10, "states_seen": ["IDLE", "CONNECTED", "AUTHED", "READY", "DATA_MODE", "CLOSED", "LIMBO", "SUSPECT", "CRASHED", "DONE"], "violations": [], "unique_edges": 42, "unique_seqs": 26227, "crashes": 1003, "first_crash_step": 83, "wall_s": 33.0}
+wrote results/toy_comparison_seed0.json
