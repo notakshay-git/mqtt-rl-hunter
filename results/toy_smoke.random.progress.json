@@ -1,0 +1,14 @@
+{
+  "agent": "random",
+  "seed": 0,
+  "steps": 20000,
+  "budget": 20000,
+  "episodes": 1364,
+  "unique_states": 10,
+  "unique_edges": 42,
+  "unique_seqs": 13467,
+  "crashes": 46,
+  "first_crash_step": 47,
+  "mean_ep_return_last20": -2.620000000000001,
+  "wall_s": 0.1
+}

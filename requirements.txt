@@ -1,0 +1,6 @@
+numpy
+gymnasium
+torch --index-url https://download.pytorch.org/whl/cpu
+amqtt
+websockets
+pyyaml
