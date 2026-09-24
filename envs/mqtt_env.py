@@ -21,7 +21,9 @@ amqtt 0.12.1 source, see repro/repro_violations.py):
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-import socket, subprocess, time, os, sys, signal
+import socket, subprocess, time, os, sys, signal, logging
+
+log = logging.getLogger("mqtt_env")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from envs import mqtt_packets as P
@@ -111,12 +113,13 @@ class MQTTFuzzEnv(gym.Env):
     def _kill_broker(self):
         try:
             os.killpg(os.getpgid(self._broker.pid), signal.SIGKILL)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("killpg failed for broker pid %s: %r",
+                        getattr(self._broker, "pid", "?"), e)
         try:
             self._broker.wait(timeout=3)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("broker wait failed: %r", e)
 
     def close(self):
         self._kill_broker()
@@ -127,8 +130,8 @@ class MQTTFuzzEnv(gym.Env):
         if getattr(self, "_sock", None):
             try:
                 self._sock.close()
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("socket close failed: %r", e)
         self._sock = None
 
     def _open_sock(self):
@@ -294,7 +297,8 @@ class MQTTFuzzEnv(gym.Env):
         rtt_ms = (time.time() - t0) * 1000.0
         try:
             fds = len(os.listdir("/proc/%d/fd" % self._broker.pid))
-        except Exception:
+        except Exception as e:
+            log.warning("fd count failed: %r", e)
             fds = -1
         self.store["broker_fds_max"] = max(
             self.store.get("broker_fds_max", 0), fds)
