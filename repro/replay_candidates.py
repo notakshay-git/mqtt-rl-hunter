@@ -41,7 +41,6 @@ PACKETS = {
 def replay(seq, flag_idx, port=PORT):
     """Replay seq on one fresh socket; return resp observed at flag_idx."""
     s = None
-    connected = False
     resp_at_flag = None
     try:
         for i, act in enumerate(seq):
@@ -67,15 +66,12 @@ def replay(seq, flag_idx, port=PORT):
                     # fast reads mid-sequence (fresh broker answers in ms);
                     # long read only at the flag step, where it counts
                     r, det = read_resp(s, t=(READ_T if i == flag_idx else 0.3))
-                if r == "CONNACK_OK":
-                    connected = True
                 if r == "CLOSED_BY_BROKER":
-                    connected = False
                     try: s.close()
                     except OSError: pass
                     s = None
                 if i == flag_idx:
-                    resp_at_flag = (r, connected_before(act, connected, r))
+                    resp_at_flag = (r, None)
             if i == flag_idx and act in ("OPEN_TCP", "CLOSE_TCP"):
                 resp_at_flag = ("N/A", None)
     finally:
@@ -83,12 +79,6 @@ def replay(seq, flag_idx, port=PORT):
             try: s.close()
             except OSError: pass
     return resp_at_flag
-
-def connected_before(act, connected, r):
-    """connected state BEFORE this action's response was processed."""
-    if r == "CONNACK_OK" and act in ("CONNECT_VALID", "CONNECT_DUP"):
-        return False if not connected else connected  # already updated; approximate
-    return connected
 
 def check(ev, port=PORT):
     """Return (confirmed, note)."""

@@ -185,6 +185,93 @@ class MQTTFuzzEnv(gym.Env):
         misread as silence."""
         return self._read_resp(1.5)
 
+    # -------------------------------------- session I/O, verdict, state
+    # These three methods are the answer to the round-1/2 architect
+    # reviews: packet I/O, violation verdicts, and session-state mutation
+    # used to be interleaved in step() with special cases accreting per
+    # correction.  Now each concern lives in exactly one method, and
+    # session state mutates ONLY in _apply_session.
+    def _dispatch(self, a):
+        """Send the packet for action a and classify the response.
+
+        Handles confirmation reads (slow-but-compliant brokers are never
+        misread as silent) and the delayed-CONNACK absorb for SUBSCRIBE.
+        Pure I/O + classify: no violation verdicts, no session mutation
+        (the absorb updates state through _apply_session, once)."""
+        if a == CONNECT_VALID:
+            self._n_connects += 1
+            return self._send_recv(P.connect())
+        if a == CONNECT_MALFORMED:
+            r = self._send_recv(P.connect_malformed())
+            if r == RESP["NONE"]:
+                r = self._confirm_read()
+            return r
+        if a == CONNECT_DUP:
+            # a valid CONNECT with a different client id
+            r = self._send_recv(P.connect(client_id="rl-dup"))
+            if r == RESP["NONE"] and self._mqtt_connected:
+                r = self._confirm_read()
+            return r
+        if a == SUBSCRIBE:
+            r = self._send_recv(P.subscribe())
+            if r == RESP["CONNACK_OK"]:
+                # delayed CONNACK from an earlier CONNECT: the session WAS
+                # established; absorb it, then read the SUBSCRIBE's answer
+                self._apply_session(r)
+                r = self._confirm_read()
+            return r
+        if a == SUBSCRIBE_MALFORMED:
+            return self._send_recv(P.subscribe_malformed())
+        if a == AUTH_PACKET:
+            return self._send_recv(P.auth_v5())
+        if a == PUBLISH:
+            return self._send_recv(P.publish())
+        if a == PUBLISH_OVERSIZED:
+            return self._send_recv(P.publish_oversized())
+        if a == DISCONNECT:
+            return self._send_recv(P.disconnect())
+        return self._send_recv(P.garbage())
+
+    def _judge(self, a, r, was_connected, new_violations):
+        """Violation verdicts.  Reads session state, never mutates it.
+        Every verdict requires a confirmation read to have already run in
+        _dispatch, and every flag still has to survive replay verification
+        before it counts as a finding."""
+        if a == CONNECT_MALFORMED:
+            if r == RESP["CONNACK_OK"]:
+                self._flag(new_violations, "V4_connack_ok_after_malformed", a, r)
+            elif r == RESP["NONE"]:
+                # no CONNACK of any kind even after 1.5s, conn open
+                self._flag(new_violations, "V1_open_after_malformed_connect", a, r)
+            # CONNACK_ERR (rc=0x01) or CLOSED_BY_BROKER = spec-compliant
+        elif a == CONNECT_DUP and was_connected:
+            # spec [MQTT-3.1.0-2]: a second CONNECT on an established
+            # session must close the connection.  CONNACK_OK or silence
+            # with an open socket are both violations.
+            if r in (RESP["CONNACK_OK"], RESP["NONE"]):
+                self._flag(new_violations, "V2_open_after_second_connect", a, r)
+            # CLOSED_BY_BROKER = compliant disconnect
+        elif a == SUBSCRIBE:
+            if r == RESP["SUBACK"] and not self._mqtt_connected:
+                self._flag(new_violations, "V3_suback_before_connect", a, r)
+
+    def _apply_session(self, r):
+        """THE single place session state mutates, driven ONLY by
+        observed broker responses.  Env-side state is an ESTIMATE of broker
+        reality; keeping every transition here stops the special-case
+        accretion that produced course correction #3.  The spec-compliant
+        trajectories are pinned by tests/test_env_broker.py."""
+        if r == RESP["CONNACK_OK"]:
+            self._mqtt_connected = 1
+        elif r == RESP["SUBACK"]:
+            self._subscribed = 1
+        elif r == RESP["CLOSED_BY_BROKER"]:
+            # broker tore the session down; keep our state honest
+            self._mqtt_connected = 0
+            self._subscribed = 0
+            self._close_sock()
+            self._tcp_open = 0
+
     # ------------------------------------------------ DoS / hang oracle
     def _probe_broker_health(self):
         """Episode-start health probe: time a fresh CONNECT->CONNACK round
@@ -277,79 +364,13 @@ class MQTTFuzzEnv(gym.Env):
                 self._last_resp = RESP["ERROR"]
             else:
                 was_connected = self._mqtt_connected
-                if a == CONNECT_VALID:
-                    r = self._send_recv(P.connect())
-                    self._n_connects += 1
-                    if r == RESP["CONNACK_OK"]:
-                        self._mqtt_connected = 1
-                elif a == CONNECT_MALFORMED:
-                    r = self._send_recv(P.connect_malformed())
-                    if r == RESP["NONE"]:
-                        r = self._confirm_read()
-                    if r == RESP["CONNACK_OK"]:
-                        self._flag(new_violations, "V4_connack_ok_after_malformed", a, r)
-                    elif r == RESP["NONE"]:
-                        # no CONNACK of any kind even after 1.5s, conn open
-                        self._flag(new_violations, "V1_open_after_malformed_connect", a, r)
-                    # CONNACK_ERR (rc=0x01) or CLOSED_BY_BROKER = spec-compliant
-                elif a == CONNECT_DUP:
-                    # A valid CONNECT with a different client id.  V2 only
-                    # applies when a session was ALREADY established on this
-                    # socket; otherwise this is just a first connect.
-                    r = self._send_recv(P.connect(client_id="rl-dup"))
-                    if r == RESP["NONE"] and was_connected:
-                        r = self._confirm_read()
-                    if r == RESP["CONNACK_OK"]:
-                        if was_connected:
-                            # spec [MQTT-3.1.0-2]: second CONNECT must close
-                            self._flag(new_violations,
-                                       "V2_open_after_second_connect", a, r)
-                        else:
-                            self._mqtt_connected = 1
-                    elif r == RESP["NONE"] and was_connected:
-                        # connected session, second CONNECT met with silence
-                        # and an open connection instead of a disconnect
-                        self._flag(new_violations,
-                                   "V2_open_after_second_connect", a, r)
-                    elif r == RESP["CLOSED_BY_BROKER"] and was_connected:
-                        # compliant disconnect; session is gone
-                        self._mqtt_connected = 0
-                        self._subscribed = 0
-                elif a == AUTH_PACKET:
-                    r = self._send_recv(P.auth_v5())
-                elif a == SUBSCRIBE:
-                    r = self._send_recv(P.subscribe())
-                    if r == RESP["CONNACK_OK"]:
-                        # delayed CONNACK from an earlier CONNECT: the broker
-                        # session WAS established; our flag was stale
-                        self._mqtt_connected = 1
-                        was_connected = True
-                        r = self._confirm_read()
-                    if r == RESP["SUBACK"]:
-                        self._subscribed = 1
-                        if not was_connected:
-                            self._flag(new_violations,
-                                       "V3_suback_before_connect", a, r)
-                elif a == SUBSCRIBE_MALFORMED:
-                    r = self._send_recv(P.subscribe_malformed())
-                elif a == PUBLISH:
-                    r = self._send_recv(P.publish())
-                elif a == PUBLISH_OVERSIZED:
-                    r = self._send_recv(P.publish_oversized())
-                elif a == DISCONNECT:
-                    r = self._send_recv(P.disconnect())
+                r = self._dispatch(a)
+                self._judge(a, r, was_connected, new_violations)
+                self._apply_session(r)
+                if a == DISCONNECT:
+                    # client intent ends the session whatever the broker says
                     self._mqtt_connected = 0
                     self._subscribed = 0
-                else:
-                    r = self._send_recv(P.garbage())
-                if r == RESP["CONNACK_OK"]:
-                    self._mqtt_connected = 1
-                if r == RESP["CLOSED_BY_BROKER"]:
-                    # broker tore the session down; keep our state honest
-                    self._mqtt_connected = 0
-                    self._subscribed = 0
-                    self._close_sock()
-                    self._tcp_open = 0
                 self._last_resp = r
         elif a == CLOSE_TCP:
             self._close_sock()
