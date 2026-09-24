@@ -123,7 +123,7 @@ class MQTTFuzzEnv(gym.Env):
         try:
             self._sock = socket.create_connection(("127.0.0.1", PORT),
                                                   timeout=2.0)
-            self._sock.settimeout(1.0)
+            self._sock.settimeout(0.1)
             return True
         except OSError:
             self._sock = None
