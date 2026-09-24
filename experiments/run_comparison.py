@@ -70,6 +70,7 @@ def run_agent(agent, make_env, budget, seed, progress_path, ckpt_dir=None, env_n
             if ckpt_dir and isinstance(agent, PPOPolicy):
                 os.makedirs(ckpt_dir, exist_ok=True)
                 agent.save(os.path.join(ckpt_dir, f"ppo_{steps}.pt"))
+    env.close()  # kill this phase's broker so the next agent phase binds cleanly
     return {
         "agent": agent.name, "seed": seed, "steps": steps,
         "episodes": episodes,
@@ -114,6 +115,7 @@ def main():
                               probe.observation_space.shape[0], seed=args.seed)
         else:
             raise ValueError(name)
+        probe.close()  # probe env spawns a real broker; free the port before the run env starts
         progress = args.out.replace(".json", f".{name}.progress.json")
         ckpt = f"checkpoints/{args.env}/{name}" if name == "rl" else None
         print(f"[{name}] budget={args.budget} seed={args.seed}", flush=True)

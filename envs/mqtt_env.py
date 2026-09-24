@@ -86,14 +86,19 @@ class MQTTFuzzEnv(gym.Env):
         raise RuntimeError("broker failed to start")
 
     def _broker_alive(self):
+        # Ground truth = the broker process we spawned. poll() first: a dead
+        # process is a real crash. The port probe is retried so a transient
+        # connect failure under load is not misread as broker death.
         if self._broker.poll() is not None:
             return False
-        try:
-            s = socket.create_connection(("127.0.0.1", PORT), timeout=0.5)
-            s.close()
-            return True
-        except OSError:
-            return False
+        for _ in range(3):
+            try:
+                s = socket.create_connection(("127.0.0.1", PORT), timeout=0.5)
+                s.close()
+                return True
+            except OSError:
+                time.sleep(0.2)
+        return False
 
     def _kill_broker(self):
         try:
