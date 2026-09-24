@@ -122,6 +122,7 @@ def main():
     p.add_argument("--out", default="results/toy_comparison.json")
     p.add_argument("--agents", default="random,coverage,rl")
     p.add_argument("--env", choices=["toy", "mqtt"], default="toy")
+    p.add_argument("--port", type=int, default=18883, help="MQTT broker port; ws listener uses port+1. Give each parallel lane its own port.")
     args = p.parse_args()
     seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else None
 
@@ -157,7 +158,7 @@ def run_all_agents(args):
             make_env = lambda store: ToyProtocolEnv(novelty_reward=True,
                                                     novelty_store=store)
         else:
-            make_env = lambda store: MQTTFuzzEnv(novelty_reward=True,
+            make_env = lambda store: MQTTFuzzEnv(novelty_reward=True, port=args.port,
                                                  novelty_store=store)
         probe = make_env({"states": set(), "edges": set(), "seqs": set(),
                           "crashes": [], "violations": []})
@@ -172,7 +173,7 @@ def run_all_agents(args):
             raise ValueError(name)
         probe.close()  # probe env spawns a real broker; free the port before the run env starts
         progress = args.out.replace(".json", f".{name}.seed{args.seed}.progress.json")
-        ckpt = f"checkpoints/{args.env}/{name}" if name == "rl" else None
+        ckpt = f"checkpoints/{args.env}/{name}_seed{args.seed}" if name == "rl" else None
         print(f"[{name}] budget={args.budget} seed={args.seed}", flush=True)
         results.append(run_agent(agent, make_env, args.budget, args.seed,
                                  progress, ckpt, env_name=args.env))
