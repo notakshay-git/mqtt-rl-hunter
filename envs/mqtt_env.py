@@ -25,6 +25,7 @@ import socket, subprocess, time, os, sys, signal
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from envs import mqtt_packets as P
+from envs.mqtt_classify import RESP, RESP_NAMES, read_resp as _shared_read
 
 ACTIONS = ["OPEN_TCP", "CONNECT_VALID", "CONNECT_MALFORMED", "CONNECT_DUP",
            "AUTH_PACKET", "SUBSCRIBE", "SUBSCRIBE_MALFORMED", "PUBLISH",
@@ -33,12 +34,11 @@ ACTIONS = ["OPEN_TCP", "CONNECT_VALID", "CONNECT_MALFORMED", "CONNECT_DUP",
  SUBSCRIBE, SUBSCRIBE_MALFORMED, PUBLISH, PUBLISH_OVERSIZED, DISCONNECT,
  GARBAGE, CLOSE_TCP) = range(12)
 
-RESP = {"NONE": 0, "CONNACK_OK": 1, "CONNACK_ERR": 2, "SUBACK": 3,
-        "PINGRESP": 4, "CLOSED_BY_BROKER": 5, "ERROR": 6, "OTHER": 7}
 MAX_STEPS = 60
-PORT = 18883
+PORT = 18883  # default only; pass port= to run parallel envs on other ports
 
-BROKER_CONFIG = """\
+def broker_config(port):
+    return """\
 listeners:
   default:
     type: tcp
@@ -50,14 +50,14 @@ listeners:
 sys_interval: 0
 auth:
   allow-anonymous: true
-""" % (PORT, PORT + 1)
+""" % (port, port + 1)
 
 
 class MQTTFuzzEnv(gym.Env):
     metadata = {"name": "mqtt-amqtt-v1"}
 
     def __init__(self, novelty_reward=True, novelty_store=None,
-                 broker_start_timeout=15.0):
+                 broker_start_timeout=15.0, port=PORT, config_path=None):
         super().__init__()
         self.action_space = spaces.Discrete(12)
         # obs: [tcp_open, mqtt_connected, subscribed, last_resp/8,
@@ -68,9 +68,10 @@ class MQTTFuzzEnv(gym.Env):
         self.store = novelty_store if novelty_store is not None else {
             "states": set(), "edges": set(), "seqs": set(),
             "crashes": [], "violations": []}
-        self._cfg_path = "/tmp/amqtt_rl.yaml"
+        self.port = port
+        self._cfg_path = config_path or "/tmp/amqtt_rl_%d.yaml" % port
         with open(self._cfg_path, "w") as f:
-            f.write(BROKER_CONFIG)
+            f.write(broker_config(port))
         self._broker_timeout = broker_start_timeout
         self._start_broker()
 
@@ -85,7 +86,7 @@ class MQTTFuzzEnv(gym.Env):
             if self._broker.poll() is not None:
                 break
             try:
-                s = socket.create_connection(("127.0.0.1", PORT), timeout=0.5)
+                s = socket.create_connection(("127.0.0.1", self.port), timeout=0.5)
                 s.close()
                 return
             except OSError:
@@ -100,7 +101,7 @@ class MQTTFuzzEnv(gym.Env):
             return False
         for _ in range(3):
             try:
-                s = socket.create_connection(("127.0.0.1", PORT), timeout=0.5)
+                s = socket.create_connection(("127.0.0.1", self.port), timeout=0.5)
                 s.close()
                 return True
             except OSError:
@@ -133,7 +134,7 @@ class MQTTFuzzEnv(gym.Env):
     def _open_sock(self):
         self._close_sock()
         try:
-            self._sock = socket.create_connection(("127.0.0.1", PORT),
+            self._sock = socket.create_connection(("127.0.0.1", self.port),
                                                   timeout=2.0)
             self._sock.settimeout(0.1)
             return True
@@ -142,32 +143,11 @@ class MQTTFuzzEnv(gym.Env):
             return False
 
     def _read_resp(self, timeout):
-        """Read and classify one 4-byte response head within `timeout` s."""
-        if self._sock is None:
-            return RESP["ERROR"]
-        try:
-            self._sock.settimeout(timeout)
-            head = self._sock.recv(4)
-            if not head:
-                return RESP["CLOSED_BY_BROKER"]
-            ptype = head[0] >> 4
-            if ptype == 2:  # CONNACK
-                rc = head[3] if len(head) >= 4 else 99
-                return RESP["CONNACK_OK"] if rc == 0 else RESP["CONNACK_ERR"]
-            if ptype == 9:
-                return RESP["SUBACK"]
-            if ptype == 13:
-                return RESP["PINGRESP"]
-            return RESP["OTHER"]
-        except socket.timeout:
-            return RESP["NONE"]
-        except OSError:
-            return RESP["CLOSED_BY_BROKER"]
-        finally:
-            try:
-                self._sock.settimeout(0.1)
-            except OSError:
-                pass
+        """Read and classify one 4-byte response head within `timeout` s.
+
+        Classification lives in envs/mqtt_classify.py - the SAME module the
+        replay validator uses, so detector and verifier cannot diverge."""
+        return _shared_read(self._sock, timeout, reset_timeout=0.1)
 
     def _send_recv(self, data, timeout=0.1):
         """Send bytes, return RESP class for the broker's response."""
@@ -205,6 +185,40 @@ class MQTTFuzzEnv(gym.Env):
         misread as silence."""
         return self._read_resp(1.5)
 
+    # ------------------------------------------------ DoS / hang oracle
+    def _probe_broker_health(self):
+        """Episode-start health probe: time a fresh CONNECT->CONNACK round
+        trip on a side connection and sample the broker fd count.  A broker
+        that is ALIVE but degraded (fd exhaustion, wedged handlers, pinned
+        CPU) shows up here as a slow/failed probe - the process-death crash
+        oracle alone misses that whole DoS class (we watched amqtt sit at
+        375+ CLOSE-WAIT fds with CPU pinned while still alive)."""
+        if self._broker.poll() is not None:
+            return
+        t0 = time.time()
+        resp = RESP["ERROR"]
+        try:
+            s = socket.create_connection(("127.0.0.1", self.port), timeout=2.0)
+            s.sendall(P.connect(client_id="rl-health"))
+            resp = _shared_read(s, 2.0)
+            s.close()
+        except OSError:
+            pass
+        rtt_ms = (time.time() - t0) * 1000.0
+        try:
+            fds = len(os.listdir("/proc/%d/fd" % self._broker.pid))
+        except Exception:
+            fds = -1
+        self.store["broker_fds_max"] = max(
+            self.store.get("broker_fds_max", 0), fds)
+        self.store["probe_rtt_max_ms"] = max(
+            self.store.get("probe_rtt_max_ms", 0.0), rtt_ms)
+        if resp != RESP["CONNACK_OK"] or rtt_ms > 2000.0:
+            self.store.setdefault("degraded", []).append({
+                "episode": self._episodes, "resp": RESP_NAMES[resp],
+                "rtt_ms": round(rtt_ms, 1), "broker_fds": fds,
+                "wall": round(time.time(), 1)})
+
     # ------------------------------------------------------------ gym
     @property
     def state(self):
@@ -227,6 +241,7 @@ class MQTTFuzzEnv(gym.Env):
             self._start_broker()
         self._broker_ok = True
         self._close_sock()
+        self._probe_broker_health()
         self._tcp_open = 0
         self._mqtt_connected = 0
         self._subscribed = 0

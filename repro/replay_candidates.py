@@ -11,31 +11,19 @@ Writes <input>.replay.json"""
 import socket, subprocess, sys, time, os, json
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "envs"))
 import mqtt_packets as P
+from mqtt_classify import RESP, RESP_NAMES, read_resp as _shared_read
 
 PORT, CFG = 18893, "/tmp/amqtt_repro.yaml"
 READ_T = 3.0
 MAX_PER_TYPE = 20
 
 def read_resp(s, t=READ_T):
-    """Return (RESP-name, detail). Mirrors the env's classifier."""
-    s.settimeout(t)
-    try:
-        head = s.recv(4)
-        if not head:
-            return ("CLOSED_BY_BROKER", "EOF")
-        ptype = head[0] >> 4
-        if ptype == 2:
-            rc = head[3] if len(head) >= 4 else 99
-            return ("CONNACK_OK" if rc == 0 else "CONNACK_ERR", head.hex())
-        if ptype == 9:
-            return ("SUBACK", head.hex())
-        if ptype == 13:
-            return ("PINGRESP", head.hex())
-        return ("OTHER", head.hex())
-    except socket.timeout:
-        return ("NONE", "silent")
-    except (ConnectionResetError, BrokenPipeError, OSError):
-        return ("CLOSED_BY_BROKER", "reset")
+    """(name, detail) wrapper over the SHARED classifier
+    (envs/mqtt_classify.py) - verifier and detector classify identically."""
+    r = _shared_read(s, t)
+    name = RESP_NAMES[r]
+    detail = {"NONE": "silent", "CLOSED_BY_BROKER": "reset/EOF"}.get(name, name)
+    return (name, detail)
 
 PACKETS = {
     "CONNECT_VALID": lambda: P.connect(),
@@ -50,7 +38,7 @@ PACKETS = {
     "GARBAGE": lambda: P.garbage(),
 }
 
-def replay(seq, flag_idx):
+def replay(seq, flag_idx, port=PORT):
     """Replay seq on one fresh socket; return resp observed at flag_idx."""
     s = None
     connected = False
@@ -60,7 +48,7 @@ def replay(seq, flag_idx):
             if act == "OPEN_TCP":
                 if s is None:
                     try:
-                        s = socket.create_connection(("127.0.0.1", PORT), timeout=3)
+                        s = socket.create_connection(("127.0.0.1", port), timeout=3)
                     except OSError:
                         s = None
             elif act == "CLOSE_TCP":
@@ -102,7 +90,7 @@ def connected_before(act, connected, r):
         return False if not connected else connected  # already updated; approximate
     return connected
 
-def check(ev):
+def check(ev, port=PORT):
     """Return (confirmed, note)."""
     v = ev["violation"]; seq = ev["sequence"]
     # flag step = position of the flagged action = len(seq)-1 (flag fires on
@@ -110,7 +98,7 @@ def check(ev):
     # action, so the flagged action is ev['action'] at index len(seq))
     seq_full = seq + [ev["action"]]
     flag_idx = len(seq_full) - 1
-    got = replay(seq_full, flag_idx)
+    got = replay(seq_full, flag_idx, port=port)
     if not got or got[0] in (None, "N/A"):
         return (False, f"no response captured at flag step (got {got})")
     r, _ = got
@@ -124,10 +112,16 @@ def check(ev):
         return (r == "CONNACK_OK", f"replay resp at flag: {r}")
     return (False, "unknown violation type")
 
-def main(path):
+def main(path, port=PORT, cfg=CFG):
     data = json.load(open(path))
     report = {}
-    for res in data.get("results", [data] if "results" not in data else []):
+    runs = data["runs"] if "runs" in data else [data]
+    results = []
+    for run in runs:
+        results.extend(run.get("results", []))
+    if not results and "violation_events" in data:
+        results = [data]
+    for res in results:
         events = res.get("violation_events", [])
         per_type = {}
         for ev in events:
@@ -137,7 +131,7 @@ def main(path):
             confirmed, tried = 0, 0
             notes = []
             for ev in evs[:MAX_PER_TYPE]:
-                ok, note = check(ev)
+                ok, note = check(ev, port=port)
                 tried += 1
                 confirmed += 1 if ok else 0
                 if len(notes) < 5:
@@ -151,4 +145,9 @@ def main(path):
     print(json.dumps(report, indent=2))
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    kw = {}
+    if len(sys.argv) > 2:
+        kw["port"] = int(sys.argv[2])
+    if len(sys.argv) > 3:
+        kw["cfg"] = sys.argv[3]
+    main(sys.argv[1], **kw)

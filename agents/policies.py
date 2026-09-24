@@ -53,6 +53,21 @@ class CoverageGuidedPolicy:
 
 
 # ------------------------------------------------------------ PPO (torch)
+def compute_gae(rews, vals, dones, gamma, lam):
+    """Generalized advantage estimation.
+
+    vals/dones carry one appended bootstrap/final entry (len = len(rews)+1).
+    Extracted as a pure function so tests can check the math against
+    hand-computed values."""
+    adv = np.zeros_like(rews)
+    gae = 0.0
+    for t in reversed(range(len(rews))):
+        delta = rews[t] + gamma * vals[t + 1] * (1 - dones[t]) - vals[t]
+        gae = delta + gamma * lam * (1 - dones[t]) * gae
+        adv[t] = gae
+    return adv
+
+
 class ActorCritic(nn.Module):
     def __init__(self, obs_dim, n_actions, hidden=64):
         super().__init__()
@@ -114,13 +129,7 @@ class PPOPolicy:
         rews = np.array(b["rew"], dtype=np.float32)
         vals = np.array(b["val"] + [0.0], dtype=np.float32)
         dones = np.array(b["done"] + [True], dtype=np.float32)
-        # GAE
-        adv = np.zeros_like(rews)
-        gae = 0.0
-        for t in reversed(range(len(rews))):
-            delta = rews[t] + self.gamma * vals[t + 1] * (1 - dones[t]) - vals[t]
-            gae = delta + self.gamma * self.lam * (1 - dones[t]) * gae
-            adv[t] = gae
+        adv = compute_gae(rews, vals, dones, self.gamma, self.lam)
         ret = adv + vals[:-1]
         obs = torch.as_tensor(np.array(b["obs"]), dtype=torch.float32,
                               device=self.device)

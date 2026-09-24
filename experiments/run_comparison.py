@@ -60,6 +60,7 @@ def run_agent(agent, make_env, budget, seed, progress_path, ckpt_dir=None, env_n
                 "unique_edges": len(store["edges"]),
                 "unique_seqs": len(store["seqs"]),
                 "crashes": len(store["crashes"]),
+                "degraded_events": len(store.get("degraded", [])),
                 "first_crash_step": first_crash_step,
                 "mean_ep_return_last20":
                     float(np.mean(recent_returns[-20:])) if recent_returns else 0.0,
@@ -78,6 +79,10 @@ def run_agent(agent, make_env, budget, seed, progress_path, ckpt_dir=None, env_n
         "states_seen": states_seen_names(store, env_name),
         "violations": list(store["violations"]),
         "violation_events": store.get("violation_events", [])[:100],
+        "degraded_events": len(store.get("degraded", [])),
+        "degraded_samples": store.get("degraded", [])[:5],
+        "probe_rtt_max_ms": round(store.get("probe_rtt_max_ms", 0.0), 1),
+        "broker_fds_max": store.get("broker_fds_max", 0),
         "unique_edges": len(store["edges"]),
         "unique_seqs": len(store["seqs"]),
         "crashes": len(store["crashes"]),
@@ -87,16 +92,65 @@ def run_agent(agent, make_env, budget, seed, progress_path, ckpt_dir=None, env_n
     }
 
 
+def aggregate_runs(all_runs):
+    """Cross-seed mean/std of the headline metrics, per agent."""
+    by_agent = {}
+    for run in all_runs:
+        for r in run["results"]:
+            by_agent.setdefault(r["agent"], []).append(r)
+    metrics = ["crashes", "unique_states", "unique_edges", "unique_seqs",
+               "first_crash_step", "degraded_events", "wall_s"]
+    agg = {}
+    for name, rs in by_agent.items():
+        a = {}
+        for m in metrics:
+            vals = [r[m] for r in rs if r.get(m) is not None]
+            if vals:
+                a[m + "_mean"] = round(float(np.mean(vals)), 2)
+                a[m + "_std"] = round(float(np.std(vals)), 2)
+        agg[name] = a
+    return agg
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--budget", type=int, default=100_000)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seeds", default=None,
+                   help="comma list (e.g. 0,1,2); overrides --seed and adds "
+                        "cross-seed mean/std aggregate to the output")
     p.add_argument("--out", default="results/toy_comparison.json")
     p.add_argument("--agents", default="random,coverage,rl")
     p.add_argument("--env", choices=["toy", "mqtt"], default="toy")
     args = p.parse_args()
+    seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else None
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    if seeds:
+        all_runs = []
+        for seed in seeds:
+            args.seed = seed
+            seed_out = args.out.replace(".json", ".seed%d.json" % seed)
+            results = run_all_agents(args)
+            with open(seed_out, "w") as f:
+                json.dump({"budget": args.budget, "seed": seed,
+                           "results": results}, f, indent=2)
+            all_runs.append({"seed": seed, "results": results})
+            print("wrote", seed_out)
+        with open(args.out, "w") as f:
+            json.dump({"budget": args.budget, "seeds": seeds,
+                       "runs": all_runs,
+                       "aggregate": aggregate_runs(all_runs)}, f, indent=2)
+        print("wrote", args.out, "(multi-seed aggregate)")
+        return
+    results = run_all_agents(args)
+    with open(args.out, "w") as f:
+        json.dump({"budget": args.budget, "seed": args.seed,
+                   "results": results}, f, indent=2)
+    print("wrote", args.out)
+
+
+def run_all_agents(args):
     results = []
     for name in args.agents.split(","):
         if args.env == "toy":
@@ -117,17 +171,14 @@ def main():
         else:
             raise ValueError(name)
         probe.close()  # probe env spawns a real broker; free the port before the run env starts
-        progress = args.out.replace(".json", f".{name}.progress.json")
+        progress = args.out.replace(".json", f".{name}.seed{args.seed}.progress.json")
         ckpt = f"checkpoints/{args.env}/{name}" if name == "rl" else None
         print(f"[{name}] budget={args.budget} seed={args.seed}", flush=True)
         results.append(run_agent(agent, make_env, args.budget, args.seed,
                                  progress, ckpt, env_name=args.env))
-        print(f"[{name}] -> {json.dumps({k: v for k, v in results[-1].items() if k != 'crash_sequences'})}",
+        print(f"[{name}] -> {json.dumps({k: v for k, v in results[-1].items() if k not in ('crash_sequences', 'violation_events', 'degraded_samples', 'states_seen')})}",
               flush=True)
-    with open(args.out, "w") as f:
-        json.dump({"budget": args.budget, "seed": args.seed,
-                   "results": results}, f, indent=2)
-    print("wrote", args.out)
+    return results
 
 
 if __name__ == "__main__":
