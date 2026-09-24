@@ -21,7 +21,7 @@ def states_seen_names(store, env_name):
 from agents.policies import RandomPolicy, CoverageGuidedPolicy, PPOPolicy
 
 
-def run_agent(agent, make_env, budget, seed, progress_path, ckpt_dir=None):
+def run_agent(agent, make_env, budget, seed, progress_path, ckpt_dir=None, env_name="toy"):
     # Shared global novelty store across episodes for THIS agent run
     store = {"states": set(), "edges": set(), "seqs": set(),
              "crashes": [], "violations": []}
@@ -74,7 +74,7 @@ def run_agent(agent, make_env, budget, seed, progress_path, ckpt_dir=None):
         "agent": agent.name, "seed": seed, "steps": steps,
         "episodes": episodes,
         "unique_states": len(store["states"]),
-        "states_seen": states_seen_names(store, args.env),
+        "states_seen": states_seen_names(store, env_name),
         "violations": list(store["violations"]),
         "unique_edges": len(store["edges"]),
         "unique_seqs": len(store["seqs"]),
@@ -118,7 +118,7 @@ def main():
         ckpt = f"checkpoints/{args.env}/{name}" if name == "rl" else None
         print(f"[{name}] budget={args.budget} seed={args.seed}", flush=True)
         results.append(run_agent(agent, make_env, args.budget, args.seed,
-                                 progress, ckpt))
+                                 progress, ckpt, env_name=args.env))
         print(f"[{name}] -> {json.dumps({k: v for k, v in results[-1].items() if k != 'crash_sequences'})}",
               flush=True)
     with open(args.out, "w") as f:

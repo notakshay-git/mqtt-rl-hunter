@@ -1,0 +1,9 @@
+[random] budget=100000 seed=0
+Traceback (most recent call last):
+  File "/home/sandbox/mqtt-rl-hunter/experiments/run_comparison.py", line 131, in <module>
+    main()
+  File "/home/sandbox/mqtt-rl-hunter/experiments/run_comparison.py", line 120, in main
+    results.append(run_agent(agent, make_env, args.budget, args.seed,
+  File "/home/sandbox/mqtt-rl-hunter/experiments/run_comparison.py", line 77, in run_agent
+    "states_seen": states_seen_names(store, args.env),
+NameError: name 'args' is not defined
