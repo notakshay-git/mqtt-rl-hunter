@@ -77,6 +77,7 @@ def run_agent(agent, make_env, budget, seed, progress_path, ckpt_dir=None, env_n
         "unique_states": len(store["states"]),
         "states_seen": states_seen_names(store, env_name),
         "violations": list(store["violations"]),
+        "violation_events": store.get("violation_events", [])[:100],
         "unique_edges": len(store["edges"]),
         "unique_seqs": len(store["seqs"]),
         "crashes": len(store["crashes"]),

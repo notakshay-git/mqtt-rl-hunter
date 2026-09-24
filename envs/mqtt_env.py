@@ -4,10 +4,17 @@ Drives a LIVE amqtt broker subprocess over raw TCP. The agent picks
 MQTT-flavored operations (valid/malformed/sequenced); rewards fire on
 framework-level violations of the MQTT spec and on broker crashes.
 
-Violations hunted:
-  V1 broker leaves TCP open after malformed CONNECT (must close)
-  V2 broker leaves TCP open after a second CONNECT on one connection
-  V3 SUBACK before any successful CONNECT (subscribe pre-auth accepted)
+Violation CANDIDATES hunted (each flags only after a 1.5s confirmation
+read, so a slow-but-compliant broker under load is not misread as silence;
+every candidate must then survive replay verification against a fresh broker
+before it counts as a finding, and there is deliberately NO reward for
+violation flags - unverified flags are reward-hacking bait; verified against
+amqtt 0.12.1 source, see repro/repro_violations.py):
+  V1 malformed CONNECT: no CONNACK at all and connection still open after
+     confirmation ([MQTT-3.1.2-2] requires CONNACK rc=0x01 then close)
+  V2 second CONNECT on an ALREADY-CONNECTED socket answered with CONNACK_OK
+     or silence instead of disconnect ([MQTT-3.1.0-2])
+  V3 SUBACK received with no prior successful CONNECT on this socket
   V4 CONNACK success after malformed CONNECT
   CRASH broker process dies / port stops accepting (+100, terminal)
 """
@@ -134,15 +141,12 @@ class MQTTFuzzEnv(gym.Env):
             self._sock = None
             return False
 
-    def _send_recv(self, data):
-        """Returns RESP class for the broker's response."""
+    def _read_resp(self, timeout):
+        """Read and classify one 4-byte response head within `timeout` s."""
         if self._sock is None:
             return RESP["ERROR"]
         try:
-            self._sock.sendall(data)
-        except OSError:
-            return RESP["CLOSED_BY_BROKER"]
-        try:
+            self._sock.settimeout(timeout)
             head = self._sock.recv(4)
             if not head:
                 return RESP["CLOSED_BY_BROKER"]
@@ -159,6 +163,47 @@ class MQTTFuzzEnv(gym.Env):
             return RESP["NONE"]
         except OSError:
             return RESP["CLOSED_BY_BROKER"]
+        finally:
+            try:
+                self._sock.settimeout(0.1)
+            except OSError:
+                pass
+
+    def _send_recv(self, data, timeout=0.1):
+        """Send bytes, return RESP class for the broker's response."""
+        if self._sock is None:
+            return RESP["ERROR"]
+        try:
+            self._sock.sendall(data)
+        except OSError:
+            return RESP["CLOSED_BY_BROKER"]
+        return self._read_resp(timeout)
+
+    def _flag(self, new_violations, name, action, resp):
+        """Record a violation with evidence (action, response, broker load).
+
+        Every flag carries the context needed to re-verify it later, so no
+        claimed finding is ever a bare string."""
+        new_violations.append(name)
+        try:
+            fds = len(os.listdir(f"/proc/{self._broker.pid}/fd"))
+        except Exception:
+            fds = -1
+        self.store.setdefault("violation_events", []).append({
+            "violation": name, "episode_step": self._steps,
+            "action": ACTIONS[action], "resp": resp,
+            "wall": round(time.time(), 1), "broker_fds": fds,
+            "sequence": [ACTIONS[x[1]] for x in self._path]})
+
+    def _confirm_read(self):
+        """Long (1.5s) confirmation read before any violation may flag.
+
+        The 0.1s base timeout keeps throughput high, but a broker under load
+        can take longer than 0.1s to answer.  Every violation path confirms
+        with this read first so slow-but-compliant responses (e.g. amqtt's
+        CONNACK rc=0x01 + close after a bad protocol level) are never
+        misread as silence."""
+        return self._read_resp(1.5)
 
     # ------------------------------------------------------------ gym
     @property
@@ -176,7 +221,8 @@ class MQTTFuzzEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        if not self._broker_alive():
+        self._episodes = getattr(self, "_episodes", 0) + 1
+        if not self._broker_alive() or self._episodes % 250 == 0:
             self._kill_broker()
             self._start_broker()
         self._broker_ok = True
@@ -223,27 +269,52 @@ class MQTTFuzzEnv(gym.Env):
                         self._mqtt_connected = 1
                 elif a == CONNECT_MALFORMED:
                     r = self._send_recv(P.connect_malformed())
+                    if r == RESP["NONE"]:
+                        r = self._confirm_read()
                     if r == RESP["CONNACK_OK"]:
-                        new_violations.append("V4_connack_ok_after_malformed")
-                    elif r in (RESP["NONE"],):
-                        # tolerated malformed CONNECT, conn still open
-                        new_violations.append("V1_open_after_malformed_connect")
+                        self._flag(new_violations, "V4_connack_ok_after_malformed", a, r)
+                    elif r == RESP["NONE"]:
+                        # no CONNACK of any kind even after 1.5s, conn open
+                        self._flag(new_violations, "V1_open_after_malformed_connect", a, r)
+                    # CONNACK_ERR (rc=0x01) or CLOSED_BY_BROKER = spec-compliant
                 elif a == CONNECT_DUP:
+                    # A valid CONNECT with a different client id.  V2 only
+                    # applies when a session was ALREADY established on this
+                    # socket; otherwise this is just a first connect.
                     r = self._send_recv(P.connect(client_id="rl-dup"))
-                    if r != RESP["CLOSED_BY_BROKER"]:
-                        # spec: second CONNECT must close the connection
-                        if r in (RESP["CONNACK_OK"], RESP["NONE"]):
-                            new_violations.append(
-                                "V2_open_after_second_connect")
+                    if r == RESP["NONE"] and was_connected:
+                        r = self._confirm_read()
+                    if r == RESP["CONNACK_OK"]:
+                        if was_connected:
+                            # spec [MQTT-3.1.0-2]: second CONNECT must close
+                            self._flag(new_violations,
+                                       "V2_open_after_second_connect", a, r)
+                        else:
+                            self._mqtt_connected = 1
+                    elif r == RESP["NONE"] and was_connected:
+                        # connected session, second CONNECT met with silence
+                        # and an open connection instead of a disconnect
+                        self._flag(new_violations,
+                                   "V2_open_after_second_connect", a, r)
+                    elif r == RESP["CLOSED_BY_BROKER"] and was_connected:
+                        # compliant disconnect; session is gone
+                        self._mqtt_connected = 0
+                        self._subscribed = 0
                 elif a == AUTH_PACKET:
                     r = self._send_recv(P.auth_v5())
                 elif a == SUBSCRIBE:
                     r = self._send_recv(P.subscribe())
+                    if r == RESP["CONNACK_OK"]:
+                        # delayed CONNACK from an earlier CONNECT: the broker
+                        # session WAS established; our flag was stale
+                        self._mqtt_connected = 1
+                        was_connected = True
+                        r = self._confirm_read()
                     if r == RESP["SUBACK"]:
                         self._subscribed = 1
                         if not was_connected:
-                            new_violations.append(
-                                "V3_suback_before_connect")
+                            self._flag(new_violations,
+                                       "V3_suback_before_connect", a, r)
                 elif a == SUBSCRIBE_MALFORMED:
                     r = self._send_recv(P.subscribe_malformed())
                 elif a == PUBLISH:
@@ -256,6 +327,14 @@ class MQTTFuzzEnv(gym.Env):
                     self._subscribed = 0
                 else:
                     r = self._send_recv(P.garbage())
+                if r == RESP["CONNACK_OK"]:
+                    self._mqtt_connected = 1
+                if r == RESP["CLOSED_BY_BROKER"]:
+                    # broker tore the session down; keep our state honest
+                    self._mqtt_connected = 0
+                    self._subscribed = 0
+                    self._close_sock()
+                    self._tcp_open = 0
                 self._last_resp = r
         elif a == CLOSE_TCP:
             self._close_sock()
@@ -283,8 +362,9 @@ class MQTTFuzzEnv(gym.Env):
         for v in new_violations:
             if v not in self.store["violations"]:
                 self.store["violations"].append(v)
-                reward += 25.0
                 info.setdefault("new_violations", []).append(v)
+                # NOTE: no reward. Candidates are replay-verified offline
+                # (repro/validate_violations.py) before counting as findings.
 
         nxt = self.state
         if self.novelty_reward:

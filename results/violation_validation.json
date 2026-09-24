@@ -1,0 +1,28 @@
+{
+  "broker": "amqtt 0.12.1",
+  "port": 18893,
+  "read_timeout_s": 3.0,
+  "verdicts": {
+    "V1_open_after_malformed_connect": {
+      "confirmed": false,
+      "observed": "first read: DATA 20020001; second read: CLOSED(EOF)",
+      "expected_if_compliant": "CONNACK 0x20020001 then close [MQTT-3.1.2-2]"
+    },
+    "V4_connack_ok_after_malformed": {
+      "confirmed": false,
+      "observed": "first read: DATA 20020001",
+      "expected_if_compliant": "no CONNACK rc=0"
+    },
+    "V2_open_after_second_connect": {
+      "confirmed": false,
+      "observed": "first CONNECT: DATA 20020000; second CONNECT: CLOSED(EOF) ",
+      "expected_if_compliant": "second CONNECT -> disconnect [MQTT-3.1.0-2]"
+    },
+    "V3_suback_before_connect": {
+      "confirmed": false,
+      "observed": "SUBSCRIBE-first: SILENT ",
+      "expected_if_compliant": "no SUBACK before CONNECT; disconnect preferred"
+    }
+  },
+  "confirmed": []
+}
